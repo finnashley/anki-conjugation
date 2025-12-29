@@ -21,7 +21,10 @@ cp config.example.json config.json
 - `base_card_ord` is typically `0`. `conjugation_card_ords` should list the template ordinals used for conjugations.
 - Set `anki.launch.enabled` to `false` if you manage Anki separately.
 - `anki.launch.restart_if_running` defaults to restarting any running Anki before sync. Use `anki.launch.shutdown_match` to control which related processes are terminated.
-- `anki.launch.sync_grace_seconds` controls how long we wait after sending SIGINT (Ctrl-C) to let Anki sync on exit before escalating to SIGTERM/SIGKILL.
+- `anki.launch.sigint_match` controls which processes receive SIGINT (Ctrl-C). Defaults to just Anki binaries so Xvfb does not intercept it.
+- `anki.launch.use_gui_exit` re-enables AnkiConnect `guiExitAnki` shutdown (recommended now that post-run sync is explicit).
+- `anki.launch.sync_grace_seconds` controls how long we wait before escalating shutdown when using SIGINT.
+- If Anki exits slowly, increase `anki.launch.shutdown_timeout_seconds` (default raised to 60s).
 - Set `anki.sync_after_run` to `true` if you want an explicit AnkiConnect sync after unlocking. `anki.post_unlock_settle_seconds` controls the wait before that sync.
 - Set `debug_stats` to `true` if you want per-note ladder stats logged while diagnosing unlock behavior.
 - If AnkiConnect times out on large collections, increase `anki.request_timeout_seconds` or reduce `cards_info_batch_size`.

@@ -57,6 +57,7 @@ class AnkiProcessManager:
         self.launch_cfg = launch_cfg
         self.logger = logger
         self.process = None
+        self.process_pgid = None
 
     def _list_processes(self):
         try:
@@ -104,9 +105,6 @@ class AnkiProcessManager:
         if not match_tokens:
             return
 
-        if client is not None:
-            self.logger.info("Skipping guiExitAnki; using SIGINT for sync-on-exit")
-
         current_pid = os.getpid()
         targets = []
         for proc in self._list_processes():
@@ -121,11 +119,44 @@ class AnkiProcessManager:
 
         self.logger.info("Shutting down existing Anki processes: %s", targets)
         grace = self.launch_cfg.get("sync_grace_seconds", 5)
-        self._terminate_pids(targets, match_tokens, grace_seconds=grace)
+        sigint_tokens = self.launch_cfg.get("sigint_match") or match_tokens
+        use_gui_exit = self.launch_cfg.get("use_gui_exit", True)
+        if use_gui_exit and client is not None:
+            try:
+                client.request("guiExitAnki")
+                self.logger.info("Requested Anki shutdown via AnkiConnect")
+            except Exception:
+                self.logger.info("AnkiConnect guiExitAnki not available")
+        elif client is not None:
+            self.logger.info("Skipping guiExitAnki; using SIGINT for sync-on-exit")
+        primary_tokens = sigint_tokens if use_gui_exit else match_tokens
+        self._terminate_pids(
+            targets,
+            primary_tokens,
+            grace_seconds=grace if use_gui_exit else grace,
+            sigint_tokens=sigint_tokens,
+            send_sigint=not use_gui_exit,
+        )
+        # Follow up by cleaning any remaining related processes (e.g., Xvfb).
+        self._terminate_pids(
+            None,
+            match_tokens,
+            grace_seconds=0,
+            sigint_tokens=sigint_tokens,
+            send_sigint=False,
+        )
         return
 
-    def _terminate_pids(self, targets, match_tokens, grace_seconds=5):
+    def _terminate_pids(
+        self,
+        targets,
+        match_tokens,
+        grace_seconds=5,
+        sigint_tokens=None,
+        send_sigint=True,
+    ):
         match_lower = [token.lower() for token in match_tokens]
+        sigint_lower = [token.lower() for token in (sigint_tokens or match_tokens)]
         filtered = []
         for proc in self._list_processes():
             haystack = f"{proc['comm']} {proc['args']}".lower()
@@ -135,12 +166,20 @@ class AnkiProcessManager:
         if not filtered:
             return
 
-        # SIGINT first to mimic Ctrl-C (triggers sync on exit).
-        for pid in filtered:
+        if send_sigint:
+            # SIGINT first to mimic Ctrl-C (triggers sync on exit).
+            original_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
-                os.kill(pid, signal.SIGINT)
-            except OSError:
-                continue
+                for proc in self._list_processes():
+                    haystack = f"{proc['comm']} {proc['args']}".lower()
+                    if any(token in haystack for token in sigint_lower):
+                        if targets is None or proc["pid"] in targets:
+                            try:
+                                os.kill(proc["pid"], signal.SIGINT)
+                            except OSError:
+                                continue
+            finally:
+                signal.signal(signal.SIGINT, original_handler)
 
         grace_deadline = time.time() + grace_seconds
         while time.time() < grace_deadline:
@@ -218,13 +257,29 @@ class AnkiProcessManager:
         if not command:
             raise RuntimeError("launch.enabled is true but launch.command is empty")
         self.logger.info("Launching Anki: %s", " ".join(command))
-        self.process = subprocess.Popen(command, start_new_session=True)
+        self.process = subprocess.Popen(
+            command,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.process_pgid = os.getpgid(self.process.pid)
+        except OSError:
+            self.process_pgid = None
         return True
 
     def shutdown(self, client=None):
         if not self.process:
             return
-        if client is not None:
+        use_gui_exit = self.launch_cfg.get("use_gui_exit", True)
+        if client is not None and use_gui_exit:
+            try:
+                client.request("guiExitAnki")
+                self.logger.info("Requested Anki shutdown via AnkiConnect")
+            except Exception:
+                self.logger.info("AnkiConnect guiExitAnki not available")
+        elif client is not None:
             self.logger.info("Skipping guiExitAnki; using SIGINT for sync-on-exit")
 
         timeout = self.launch_cfg.get("shutdown_timeout_seconds", 20)
@@ -234,24 +289,60 @@ class AnkiProcessManager:
             self.logger.info("Anki process exited")
             return
         except subprocess.TimeoutExpired:
-            self.logger.warning("Anki did not exit; sending SIGINT for sync")
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
-            except OSError:
-                pass
-            deadline = time.time() + grace
-            while time.time() < deadline:
-                if self.process.poll() is not None:
-                    self.logger.info("Anki process exited after SIGINT")
-                    return
-                time.sleep(0.5)
-            self.logger.warning("Anki still running after SIGINT; forcing shutdown")
+            if not use_gui_exit:
+                self.logger.warning("Anki did not exit; sending SIGINT for sync")
+                try:
+                    if self.process_pgid is not None:
+                        os.killpg(self.process_pgid, signal.SIGINT)
+                    else:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
+                except OSError:
+                    pass
+                deadline = time.time() + grace
+                while time.time() < deadline:
+                    if self.process.poll() is not None:
+                        self.logger.info("Anki process exited after SIGINT")
+                        return
+                    time.sleep(0.5)
+                self.logger.warning("Anki still running after SIGINT; forcing shutdown")
+            else:
+                self.logger.warning("Anki did not exit; forcing shutdown")
 
         match_tokens = self.launch_cfg.get("shutdown_match") or self.launch_cfg.get(
             "process_match", []
         )
-        if match_tokens:
-            self._terminate_pids(None, match_tokens, grace_seconds=grace)
+        if self.process_pgid is not None:
+            try:
+                os.killpg(self.process_pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if self.process.poll() is not None:
+                    self.logger.info("Anki process exited after SIGTERM")
+                    return
+                time.sleep(0.5)
+            try:
+                os.killpg(self.process_pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        elif match_tokens:
+            sigint_tokens = self.launch_cfg.get("sigint_match") or match_tokens
+            primary_tokens = sigint_tokens if use_gui_exit else match_tokens
+            self._terminate_pids(
+                None,
+                primary_tokens,
+                grace_seconds=grace if use_gui_exit else grace,
+                sigint_tokens=sigint_tokens,
+                send_sigint=not use_gui_exit,
+            )
+            self._terminate_pids(
+                None,
+                match_tokens,
+                grace_seconds=0,
+                sigint_tokens=sigint_tokens,
+                send_sigint=False,
+            )
         else:
             self.process.terminate()
             try:

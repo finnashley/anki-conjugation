@@ -16,7 +16,7 @@
     "startup_wait_seconds": 60,
     "poll_interval_seconds": 1,
     "post_sync_settle_seconds": 2,
-    "post_unlock_settle_seconds": 2,
+    "post_unlock_settle_seconds": 1,
     "sync_before_run": true,
     "sync_required": false,
     "sync_after_run": true,
@@ -33,8 +33,10 @@
       ],
       "process_match": ["anki", "anki-bin"],
       "shutdown_match": ["anki", "anki-bin", "xvfb-run", "Xvfb"],
-      "sync_grace_seconds": 5,
-      "shutdown_timeout_seconds": 20
+      "sigint_match": ["anki", "anki-bin"],
+      "use_gui_exit": true,
+      "sync_grace_seconds": 10,
+      "shutdown_timeout_seconds": 15
     }
   },
   "logging": {
