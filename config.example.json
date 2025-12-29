@@ -1,0 +1,50 @@
+{
+  "target_deck": "JLPT N5",
+  "target_model": "JLPT N5 Typing (EN-JP)",
+  "base_card_ord": 0,
+  "conjugation_card_ords": [1, 2, 3, 4],
+  "maturity_threshold_days": 30,
+  "max_unlock_per_note_per_run": 1,
+  "random_seed": null,
+  "debug_stats": false,
+  "cards_info_batch_size": 200,
+  "debug_limit_notes": null,
+  "anki": {
+    "connect_url": "http://127.0.0.1:8765",
+    "api_version": 6,
+    "request_timeout_seconds": 10,
+    "startup_wait_seconds": 60,
+    "poll_interval_seconds": 1,
+    "post_sync_settle_seconds": 2,
+    "post_unlock_settle_seconds": 2,
+    "sync_before_run": true,
+    "sync_required": false,
+    "sync_after_run": true,
+    "sync_after_required": false,
+    "launch": {
+      "enabled": true,
+      "restart_if_running": true,
+      "command": [
+        "xvfb-run",
+        "-a",
+        "-s",
+        "-screen 0 1280x720x24",
+        "anki"
+      ],
+      "process_match": ["anki", "anki-bin"],
+      "shutdown_match": ["anki", "anki-bin", "xvfb-run", "Xvfb"],
+      "sync_grace_seconds": 5,
+      "shutdown_timeout_seconds": 20
+    }
+  },
+  "logging": {
+    "log_path": "anki-conjugation.log",
+    "level": "INFO"
+  },
+  "notification": {
+    "type": "none",
+    "command": ["/usr/bin/printf", "%s\\n", "{summary}"],
+    "token": "",
+    "user": ""
+  }
+}

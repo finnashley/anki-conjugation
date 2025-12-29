@@ -1,0 +1,191 @@
+[200~AnkiConnect conjugation unlocker: implementation guide
+====================================================
+
+Goal
+----
+Run on a machine that can run Anki Desktop with the AnkiConnect add-on enabled. On a schedule (e.g., daily),
+the script should:
+
+1) Ensure Anki is running (headless is OK).
+2) Ensure the latest scheduling state is available (sync, then refresh).
+3) For each note in the target deck/model, decide whether to “release” (unsuspend) ONE new conjugation card
+   based on 30+ day maturity (interval >= 30 days) of previously-learned cards in that note.
+4) Pick the released conjugation card at random from the remaining suspended conjugation cards for that note.
+5) Log what it did and optionally notify the user.
+
+High-level behavior (unlock ladder)
+-----------------------------------
+Definitions:
+- “Base card” = the main vocab card for the note (usually card template ordinal 0).
+- “Conjugation cards” = sibling cards on the same note representing adjective/verb conjugations.
+- “Mature” means interval (ivl) >= 30 days.
+
+Rule:
+- Let M = number of mature cards in the ladder set for a note (base + any conjugation cards).
+- Let U = number of conjugation cards that are currently unsuspended (active) for that note.
+- Desired conjugation unlock count = min(M, total_conjugation_cards_available_for_note).
+- If U < Desired, unsuspend exactly ONE currently-suspended conjugation card for that note (chosen at random).
+
+Interpretation:
+- When the base card becomes mature (M becomes 1), one conjugation card becomes eligible to unlock.
+- When that unlocked conjugation card becomes mature (M becomes 2), another conjugation card unlocks, etc.
+- This continues until all conjugation cards for that note are unlocked.
+
+Important: unlock at most ONE conjugation card per note per run.
+
+Environment prerequisites
+-------------------------
+1) Anki Desktop installed on the machine executing the script.
+2) AnkiConnect add-on installed and enabled in that Anki profile.
+3) Script can reach AnkiConnect at http://127.0.0.1:8765 (do NOT expose this port publicly).
+4) Headless server: provide a display server for Qt apps:
+   - Use Xvfb (recommended) or a VNC/desktop session.
+5) A fixed Anki profile path (or run Anki with “-b <baseDir>” to keep data in a known directory).
+6) The deck and note type (model) names are stable, and card template ordinals or names are known.
+
+Launching Anki headlessly (Linux)
+---------------------------------
+Recommended: run Anki under Xvfb so it can start without a physical display.
+
+Example:
+  xvfb-run -a -s "-screen 0 1280x720x24" anki
+
+Process handling requirements:
+- If Anki is already running, do not launch a second instance.
+- If the script launches Anki, capture PID(s) and shut it down cleanly when finished.
+- Clean shutdown options (preferred order):
+  a) AnkiConnect action “guiExitAnki” (if available in the deployed AnkiConnect version).
+  b) Send SIGTERM to the Anki process and wait; SIGKILL only as last resort.
+- Guard against orphaned Xvfb/Anki processes:
+  - Check existing process list for “anki” and/or QtWebEngine helper processes.
+  - Avoid killing unrelated user sessions (run as a dedicated “anki” user if possible).
+
+Waiting for AnkiConnect readiness
+---------------------------------
+After launching Anki, poll AnkiConnect until it responds, e.g.:
+- POST {action:"version", version:6} or {action:"deckNames", version:6}
+- Retry with backoff (e.g., every 1–2s up to 60s).
+If it never becomes reachable, exit with error and optional notification.
+
+Sync requirements
+-----------------
+Before making decisions, ensure the collection is synced so intervals/flags reflect latest usage
+from other devices (e.g., AnkiMobile).
+
+Preferred:
+- Call AnkiConnect action “sync” and wait for completion.
+- If “sync” is not supported, fallback to a “no-op” workflow: proceed without sync and log warning.
+
+After sync, give Anki a short settle time (e.g., 1–2 seconds) before querying.
+
+AnkiConnect API basics
+----------------------
+Endpoint: http://127.0.0.1:8765
+Method: POST JSON
+Version: usually 6 in examples.
+
+Useful actions:
+- sync
+- findCards (search via Anki query language)
+- cardsInfo (retrieve interval, note id, deck, ord, suspended state, etc.)
+- findNotes / notesInfo (optional for model name and fields)
+- unsuspend (unsuspend card IDs)
+- addTags / removeTags (optional state tracking)
+
+Configuration (must be explicit)
+--------------------------------
+Provide a config file or constants for:
+
+- target_deck: e.g., "JLPT N5"
+- target_model (note type): e.g., "JLPT N5 Typing (EN→JP)"
+- base_card_ord: usually 0
+- conjugation_card_ords: list of ordinals for all conjugation templates (e.g., [1..N])
+  OR conjugation_template_names mapped to ordinals.
+- maturity_threshold_days: 30
+- max_unlock_per_note_per_run: 1
+- random_seed: optional (for reproducibility)
+
+How to discover ordinals:
+- Use Anki Browser once to inspect card template order in the note type editor.
+- Or use AnkiConnect modelTemplates/modelFieldNames if supported, then map template names to ord indices.
+
+Core algorithm (recommended implementation)
+------------------------------------------
+1) Ensure AnkiConnect reachable.
+2) Sync.
+3) Get candidate notes/cards.
+
+Card-driven approach (recommended):
+- Find all base cards in the deck/model that are mature:
+    query = deck:"<target_deck>" note:"<target_model>" prop:ivl>=30 card:<base_template>
+  Use findCards(query) -> list of base card IDs.
+- cardsInfo(base_ids) -> get note IDs (nid).
+- For each unique nid:
+    - findCards("nid:<nid>") -> all sibling card IDs
+    - cardsInfo(all_ids) -> per-card fields:
+        * ord (template index)
+        * interval (ivl)
+        * suspended (boolean)
+    - ladder = cards where ord in {base_ord} ∪ conj_ords
+    - M = count(ladder.ivl >= 30)
+    - conj = cards where ord in conj_ords
+    - U = count(conj.suspended == False)
+    - Desired = min(M, len(conj))   # len(conj) handles conditional templates
+    - If U < Desired:
+        candidates = [c for c in conj if c.suspended]
+        pick one at random
+        unsuspend([picked_card_id])
+        (do not unlock more than one per note per run)
+
+Conditional templates (“card exists”)
+------------------------------------
+If conjugation cards are wrapped in {{#Field}} ... {{/Field}}, then non-verbs/non-adjectives will not generate
+those cards. Always compute “how many conjugation cards exist for this note” from the actual card list.
+
+Random selection
+----------------
+Use Python’s random.choice over candidates. Uniform selection is sufficient.
+
+Edge cases / constraints
+------------------------
+- If base card is not mature (ivl < 30), do not unlock conjugation cards.
+- Learning cards (ivl == 0) are not mature.
+- Do not unlock cards outside the target deck/model.
+- Process each note at most once per run.
+- Decide behavior on sync failure: abort (safer) or continue with warning.
+
+Logging / reporting
+-------------------
+Log:
+- timestamp
+- notes evaluated
+- notes unlocked
+- per unlock: nid, cardId, ord/template name, which form unlocked
+- any API/process errors
+
+Optional: phone notification
+----------------------------
+Send a summary message after the run (Pushover/Telegram/Pushcut/email):
+“Unlocked X conjugation cards across Y notes; sync OK; errors: none.”
+
+Scheduling
+----------
+Run daily with cron/systemd timer (Linux) or launchd (macOS). Ensure it runs as the same user that owns the
+Anki profile.
+
+Security
+--------
+- Keep AnkiConnect bound to localhost.
+- Use SSH port forwarding if remote access is needed.
+- Do not expose 8765 publicly.
+
+Deliverables for the agent
+--------------------------
+- A runnable script (Python recommended) with:
+  - configuration (deck/model/base ord/conj ords)
+  - robust Anki process management (headless with Xvfb if needed)
+  - AnkiConnect client wrapper
+  - unlocking algorithm described above
+  - structured logging + optional push notification
+- A scheduler unit (systemd timer/cron) and setup README.
+

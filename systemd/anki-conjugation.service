@@ -1,0 +1,8 @@
+[Unit]
+Description=Anki conjugation unlocker
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/anki-conjugation
+ExecStart=%h/anki-conjugation/.venv/bin/python %h/anki-conjugation/anki_conjugation_unlocker.py --config %h/anki-conjugation/config.json
